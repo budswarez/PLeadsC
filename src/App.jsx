@@ -50,6 +50,83 @@ function reducer(st,a){switch(a.type){
   case"HIST":return{...st,history:[a.p,...st.history.slice(0,19)]};default:return st;
 }}
 
+// ═══ Google Maps JS API Loader ═══
+let mapsLoaded = false;
+let mapsLoading = false;
+let mapsCallbacks = [];
+
+function loadGoogleMaps(apiKey) {
+  return new Promise((resolve, reject) => {
+    if (mapsLoaded && window.google?.maps?.places) { resolve(); return; }
+    if (mapsLoading) { mapsCallbacks.push({ resolve, reject }); return; }
+    mapsLoading = true;
+    mapsCallbacks.push({ resolve, reject });
+    const script = document.createElement("script");
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places&language=pt-BR`;
+    script.async = true;
+    script.onload = () => { mapsLoaded = true; mapsLoading = false; mapsCallbacks.forEach(cb => cb.resolve()); mapsCallbacks = []; };
+    script.onerror = () => { mapsLoading = false; mapsCallbacks.forEach(cb => cb.reject(new Error("Falha ao carregar Google Maps JS API"))); mapsCallbacks = []; };
+    document.head.appendChild(script);
+  });
+}
+
+function textSearch(query) {
+  return new Promise((resolve, reject) => {
+    const div = document.createElement("div");
+    const service = new window.google.maps.places.PlacesService(div);
+    service.textSearch({ query }, (results, status, pagination) => {
+      if (status === window.google.maps.places.PlacesServiceStatus.OK) {
+        resolve({ results: results || [], pagination });
+      } else if (status === "ZERO_RESULTS") {
+        resolve({ results: [], pagination: null });
+      } else {
+        reject(new Error(`Places API: ${status}`));
+      }
+    });
+  });
+}
+
+function getDetails(placeId) {
+  return new Promise((resolve, reject) => {
+    const div = document.createElement("div");
+    const service = new window.google.maps.places.PlacesService(div);
+    service.getDetails({
+      placeId,
+      fields: ["name","formatted_address","formatted_phone_number","international_phone_number","website","rating","user_ratings_total","types","opening_hours","business_status","geometry","price_level","plus_code","url","vicinity"]
+    }, (result, status) => {
+      if (status === window.google.maps.places.PlacesServiceStatus.OK && result) {
+        resolve(result);
+      } else {
+        resolve(null);
+      }
+    });
+  });
+}
+
+function serializePlace(p) {
+  const obj = {};
+  obj.name = p.name || null;
+  obj.formatted_address = p.formatted_address || null;
+  obj.formatted_phone_number = p.formatted_phone_number || null;
+  obj.international_phone_number = p.international_phone_number || null;
+  obj.website = p.website || null;
+  obj.rating = p.rating ?? null;
+  obj.user_ratings_total = p.user_ratings_total ?? null;
+  obj.types = p.types || [];
+  obj.business_status = p.business_status || null;
+  obj.price_level = p.price_level ?? null;
+  obj.vicinity = p.vicinity || null;
+  obj.url = p.url || null;
+  if (p.geometry?.location) {
+    obj.geometry = { location: { lat: typeof p.geometry.location.lat === "function" ? p.geometry.location.lat() : p.geometry.location.lat, lng: typeof p.geometry.location.lng === "function" ? p.geometry.location.lng() : p.geometry.location.lng } };
+  }
+  if (p.plus_code) obj.plus_code = { global_code: p.plus_code.global_code || null };
+  if (p.opening_hours) obj.opening_hours = { open_now: p.opening_hours.isOpen?.() ?? p.opening_hours.open_now ?? null };
+  obj.place_id = p.place_id || null;
+  return obj;
+}
+
+// ═══ Components ═══
 function StatusDrop({status,statuses,onChange}){
   const[open,setOpen]=useState(false);const ref=useRef(null);
   const s=statuses.find(x=>x.id===status)||statuses[0]||{label:status,color:"#888",bg:"#8882"};
@@ -103,6 +180,7 @@ function LeadCard({lead,statuses,dispatch}){
     </div>);
 }
 
+// ═══ MAIN APP ═══
 export default function App(){
   const[st,dp]=useReducer(reducer,init);
   const[tab,setTab]=useState("search");const[query,setQ]=useState("");const[bizT,setBizT]=useState("");
@@ -117,39 +195,87 @@ export default function App(){
   const noti=(m,t="ok")=>{setNote({m,t});setTimeout(()=>setNote(null),4000)};
   const log=m=>setLogs(p=>[{t:Date.now(),m},...p.slice(0,49)]);
 
+  // ──── SEARCH via Google Maps JS Places Library (no CORS issues) ────
   const searchPlaces=async()=>{
     if(!st.config.googleApiKey){noti("Configure a API Key nas configurações","err");setTab("settings");return}
     if(!query&&!bizT){noti("Digite um termo de busca","err");return}
     if(!city||!uf){noti("Preencha estado e cidade","err");return}
+
     setL(true);setR([]);const all=[];
+    log("Carregando Google Maps JS API...");
+
+    try { await loadGoogleMaps(st.config.googleApiKey); }
+    catch(e) { log(`❌ ${e.message}`); noti("Erro ao carregar Google Maps API","err"); setL(false); return; }
+    log("✅ Google Maps carregado");
+
     const term=query||bizT;
     const qs=st.neighborhoods.length>0?st.neighborhoods.map(n=>({q:`${term} em ${n.name}, ${city}, ${uf}, Brasil`,h:n.name})):[{q:`${term} em ${city}, ${uf}, Brasil`,h:null}];
     setProg({c:0,t:qs.length});
+
     for(let i=0;i<qs.length;i++){
-      setProg({c:i+1,t:qs.length});const{q,h}=qs[i];log(`Buscando: "${q}"`);
-      try{
-        const url=`https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(q)}&key=${st.config.googleApiKey}&language=pt-BR&region=br`;
-        let data=null;
-        try{const r=await fetch(url);if(!r.ok)throw new Error(`HTTP ${r.status}`);data=await r.json();log(`${data.status}: ${data.results?.length||0} resultados`)}
-        catch(e){log(`⚠ CORS/Erro: ${e.message}. A API requer um backend proxy.`);noti("A API do Google Places requer um backend proxy (CORS). Veja Config.","err");setL(false);setProg(null);return}
-        if(data?.status==="REQUEST_DENIED"){log(`❌ ${data.error_message||"Verifique API key"}`);noti(`API Negada: ${data.error_message||"Verifique sua key"}`,"err");setL(false);setProg(null);return}
-        if(data?.status==="OVER_QUERY_LIMIT"){log("❌ Limite excedido");noti("Limite da API excedido","err");break}
-        if(data?.results){
-          for(const p of data.results){
-            let det={};
-            try{const dr=await fetch(`https://maps.googleapis.com/maps/api/place/details/json?place_id=${p.place_id}&fields=name,formatted_address,formatted_phone_number,international_phone_number,website,rating,user_ratings_total,types,opening_hours,business_status,geometry,price_level,plus_code,url,vicinity&key=${st.config.googleApiKey}&language=pt-BR`);if(dr.ok){const dd=await dr.json();if(dd.result)det=dd.result}}catch{}
-            all.push({...p,...det,id:uid(),status:"new",comments:[],captured_at:new Date().toISOString(),search_query:q,search_state:uf,search_city:city,search_neighborhood:h});
-          }
-          let nt=data.next_page_token;let pg=1;
-          while(nt&&pg<3){log(`Paginando ${pg+1}...`);await new Promise(r=>setTimeout(r,2500));
-            try{const nr=await fetch(`https://maps.googleapis.com/maps/api/place/textsearch/json?pagetoken=${nt}&key=${st.config.googleApiKey}&language=pt-BR`);if(!nr.ok)break;const nd=await nr.json();if(nd.results)nd.results.forEach(p=>all.push({...p,id:uid(),status:"new",comments:[],captured_at:new Date().toISOString(),search_query:q,search_state:uf,search_city:city,search_neighborhood:h}));nt=nd.next_page_token;pg++}catch{break}
-          }
+      setProg({c:i+1,t:qs.length});const{q,h}=qs[i];log(`🔍 Buscando: "${q}"`);
+
+      try {
+        // Text Search via JS library (no CORS)
+        const { results: places, pagination } = await textSearch(q);
+        log(`   → ${places.length} resultados`);
+
+        for (const p of places) {
+          // Get full details for each place
+          let detail = null;
+          try { detail = await getDetails(p.place_id); } catch {}
+          const src = detail || p;
+          const ser = serializePlace(src);
+          all.push({ ...ser, place_id: p.place_id, id: uid(), status: "new", comments: [], captured_at: new Date().toISOString(), search_query: q, search_state: uf, search_city: city, search_neighborhood: h });
         }
-      }catch(e){log(`❌ ${e.message}`)}
+
+        // Pagination: get next page if available
+        if (pagination && pagination.hasNextPage) {
+          log("   Paginando...");
+          await new Promise(r => setTimeout(r, 2000));
+          try {
+            const page2 = await new Promise((resolve, reject) => {
+              pagination.nextPage((results2, status2, pagination2) => {
+                if (status2 === window.google.maps.places.PlacesServiceStatus.OK) resolve({ results: results2 || [], pagination: pagination2 });
+                else resolve({ results: [], pagination: null });
+              });
+            });
+            log(`   → Página 2: ${page2.results.length} resultados`);
+            for (const p of page2.results) {
+              let detail = null;
+              try { detail = await getDetails(p.place_id); } catch {}
+              const src = detail || p;
+              const ser = serializePlace(src);
+              all.push({ ...ser, place_id: p.place_id, id: uid(), status: "new", comments: [], captured_at: new Date().toISOString(), search_query: q, search_state: uf, search_city: city, search_neighborhood: h });
+            }
+
+            // Page 3
+            if (page2.pagination && page2.pagination.hasNextPage) {
+              await new Promise(r => setTimeout(r, 2000));
+              try {
+                const page3 = await new Promise((resolve) => {
+                  page2.pagination.nextPage((r3, s3) => {
+                    if (s3 === window.google.maps.places.PlacesServiceStatus.OK) resolve({ results: r3 || [] });
+                    else resolve({ results: [] });
+                  });
+                });
+                log(`   → Página 3: ${page3.results.length} resultados`);
+                for (const p of page3.results) {
+                  const ser = serializePlace(p);
+                  all.push({ ...ser, place_id: p.place_id, id: uid(), status: "new", comments: [], captured_at: new Date().toISOString(), search_query: q, search_state: uf, search_city: city, search_neighborhood: h });
+                }
+              } catch {}
+            }
+          } catch {}
+        }
+      } catch(e) { log(`❌ ${e.message}`); }
     }
-    const seen=new Set();const uniq=all.filter(r=>{if(seen.has(r.place_id))return false;seen.add(r.place_id);return true});
-    setR(uniq);setProg(null);setL(false);dp({type:"HIST",p:{q:qs.map(x=>x.q).join(" | "),n:uniq.length,d:new Date().toISOString()}});
-    log(`✅ ${uniq.length} resultados únicos`);uniq.length>0?noti(`${uniq.length} leads encontrados!`):noti("Nenhum resultado","err");
+
+    const seen=new Set();const uniq=all.filter(r=>{if(!r.place_id||seen.has(r.place_id))return false;seen.add(r.place_id);return true});
+    setR(uniq);setProg(null);setL(false);
+    dp({type:"HIST",p:{q:qs.map(x=>x.q).join(" | "),n:uniq.length,d:new Date().toISOString()}});
+    log(`✅ Total: ${uniq.length} resultados únicos`);
+    uniq.length>0?noti(`${uniq.length} leads encontrados!`):noti("Nenhum resultado","err");
   };
 
   const importAll=()=>{dp({type:"ADD_LEADS",p:results});noti(`${results.length} leads importados!`);setR([])};
@@ -197,7 +323,6 @@ export default function App(){
 
       {note&&<div style={{position:"fixed",top:20,right:20,zIndex:9999,padding:"12px 20px",borderRadius:10,background:note.t==="err"?"#dc2626":"#059669",color:"#fff",fontSize:13,fontWeight:600,boxShadow:"0 8px 32px rgba(0,0,0,0.4)",animation:"fadeIn .3s",maxWidth:420}}>{note.m}</div>}
 
-      {/* HEADER */}
       <div style={{padding:"14px 24px",borderBottom:"1px solid #1a1a35",background:"#0e0e22",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <div style={{width:38,height:38,borderRadius:10,background:"linear-gradient(135deg,#6366f1,#7c3aed)",display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 4px 16px rgba(99,102,241,0.3)"}}>{I.Zap(22)}</div>
@@ -209,7 +334,6 @@ export default function App(){
         </div>
       </div>
 
-      {/* TABS */}
       <div style={{padding:"8px 24px",borderBottom:"1px solid #1a1a35",display:"flex",gap:4,background:"#0d0d1e"}}>
         <button onClick={()=>setTab("search")} style={tBtn("search")}>{I.Search(16)} Buscar</button>
         <button onClick={()=>setTab("leads")} style={tBtn("leads")}>{I.Bldg(15)} Leads ({st.leads.length})</button>
@@ -218,7 +342,6 @@ export default function App(){
 
       <div style={{padding:24,maxWidth:1440,margin:"0 auto"}}>
 
-        {/* ══ SEARCH ══ */}
         {tab==="search"&&<div>
           <div style={{background:"#12122a",border:"1px solid #2a2a52",borderRadius:14,padding:20,marginBottom:16}}>
             <h2 style={{margin:"0 0 14px",fontSize:15,fontWeight:700,color:"#c0c0dd",display:"flex",alignItems:"center",gap:8}}>{I.MapPin(18)} Localização</h2>
@@ -227,7 +350,7 @@ export default function App(){
               <div><label style={{fontSize:11,color:"#7777aa",marginBottom:4,display:"block"}}>Cidade *</label><input value={city} onChange={e=>setCity(e.target.value)} placeholder="Ex: Joinville" style={inp}/></div>
             </div>
             <div style={{marginTop:14}}>
-              <label style={{fontSize:11,color:"#7777aa",marginBottom:4,display:"block"}}>Bairros <span style={{color:"#6366f1"}}>(multiplica buscas, supera limite 60 resultados)</span></label>
+              <label style={{fontSize:11,color:"#7777aa",marginBottom:4,display:"block"}}>Bairros <span style={{color:"#6366f1"}}>(multiplica buscas, supera limite de 60 resultados)</span></label>
               <div style={{display:"flex",gap:8,marginBottom:8}}>
                 <input value={newH} onChange={e=>setNewH(e.target.value)} placeholder="Nome do bairro..." onKeyDown={e=>{if(e.key==="Enter"&&newH.trim()){dp({type:"ADD_HOOD",p:{id:uid(),name:newH.trim()}});setNewH("")}}} style={{...inp,flex:1}}/>
                 <button onClick={()=>{if(newH.trim()){dp({type:"ADD_HOOD",p:{id:uid(),name:newH.trim()}});setNewH("")}}} style={{...btnP,padding:"10px 14px"}}>{I.Plus()}</button>
@@ -250,13 +373,6 @@ export default function App(){
             {logs.length>0&&<div style={{marginTop:14,maxHeight:120,overflow:"auto",padding:10,background:"#0a0a18",borderRadius:8,border:"1px solid #1a1a35"}}>{logs.slice(0,10).map((l,i)=><div key={l.t+""+i} style={{fontSize:11,color:l.m.startsWith("❌")?"#f87171":l.m.startsWith("✅")?"#34d399":l.m.startsWith("⚠")?"#fbbf24":"#6a6a90",marginBottom:2,fontFamily:"monospace"}}>{l.m}</div>)}</div>}
           </div>
 
-          <div style={{background:"#fbbf2410",border:"1px solid #fbbf2430",borderRadius:12,padding:16,marginBottom:16,display:"flex",gap:10,alignItems:"flex-start"}}>
-            <span style={{color:"#fbbf24",flexShrink:0,marginTop:2}}>{I.Warn(18)}</span>
-            <div style={{fontSize:12,color:"#ccc",lineHeight:1.6}}>
-              <b style={{color:"#fbbf24"}}>Importante:</b> A Google Places API não suporta chamadas diretas do navegador (CORS). É necessário um <b>backend proxy</b> (Node.js, Cloud Function, etc). Veja as instruções na aba Config → Google Places API.
-            </div>
-          </div>
-
           {results.length>0&&<div style={{background:"#12122a",border:"1px solid #2a2a52",borderRadius:14,padding:20}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
               <h2 style={{margin:0,fontSize:15,fontWeight:700,color:"#c0c0dd"}}>{results.length} resultados</h2>
@@ -271,7 +387,6 @@ export default function App(){
           </div>}
         </div>}
 
-        {/* ══ LEADS ══ */}
         {tab==="leads"&&<div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:10,marginBottom:16}}>
             <div onClick={()=>setFSts("all")} style={{padding:"14px 10px",borderRadius:12,cursor:"pointer",textAlign:"center",background:fSts==="all"?"linear-gradient(135deg,#6366f1,#7c3aed)":"#12122a",border:`1px solid ${fSts==="all"?"#6366f150":"#2a2a52"}`,transition:"all .15s"}}><div style={{fontSize:24,fontWeight:700,fontFamily:"'Space Mono',monospace"}}>{st.leads.length}</div><div style={{fontSize:11,color:fSts==="all"?"#e0e0ff":"#7777aa",marginTop:2}}>Total</div></div>
@@ -300,7 +415,6 @@ export default function App(){
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(350px,1fr))",gap:14}}>{filtered.map(l=><LeadCard key={l.id} lead={l} statuses={st.statuses} dispatch={dp}/>)}</div></>}
         </div>}
 
-        {/* ══ SETTINGS ══ */}
         {tab==="settings"&&<div>
           <div style={{display:"flex",gap:8,marginBottom:20}}>
             {[{id:"api",label:"Google Places API",icon:I.Search(14)},{id:"supabase",label:"Supabase",icon:I.DB(14)},{id:"statuses",label:"Status",icon:I.Filter(14)}].map(t=><button key={t.id} onClick={()=>setSTab(t.id)} style={{padding:"8px 16px",border:`1px solid ${sTab===t.id?"#6366f1":"#2a2a52"}`,borderRadius:8,background:sTab===t.id?"#6366f118":"transparent",color:sTab===t.id?"#a5b4fc":"#7777aa",fontSize:12,fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>{t.icon} {t.label}</button>)}
@@ -308,34 +422,19 @@ export default function App(){
 
           {sTab==="api"&&<div style={{background:"#12122a",border:"1px solid #2a2a52",borderRadius:14,padding:24}}>
             <h2 style={{margin:"0 0 6px",fontSize:16,fontWeight:700,color:"#c0c0dd"}}>Google Places API</h2>
-            <p style={{margin:"0 0 20px",fontSize:12,color:"#7777aa"}}>Obtenha em <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer" style={{color:"#818cf8"}}>console.cloud.google.com</a></p>
+            <p style={{margin:"0 0 20px",fontSize:12,color:"#7777aa"}}>Obtenha sua chave em <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer" style={{color:"#818cf8"}}>console.cloud.google.com</a></p>
             <div style={{marginBottom:16}}><label style={{fontSize:12,color:"#9999bb",marginBottom:6,display:"block",fontWeight:600}}>API Key</label><input value={tmpC.googleApiKey} onChange={e=>setTmpC(p=>({...p,googleApiKey:e.target.value}))} placeholder="AIzaSy..." type="password" style={inp}/></div>
             <div style={{padding:16,background:"#0a0a18",borderRadius:10,marginBottom:16,fontSize:12,color:"#8888aa",lineHeight:1.7}}>
-              <b style={{color:"#fbbf24"}}>⚠ APIs necessárias:</b><div style={{marginTop:8}}>✦ Places API ✦ Places API (New) - recomendado</div>
-              <div style={{marginTop:12,padding:12,background:"#dc262615",borderRadius:8,border:"1px solid #dc262630",color:"#f87171"}}><b>🔒 CORS:</b><div style={{marginTop:4,color:"#ccc"}}>A API requer um backend proxy. Use Node.js Express, Vercel/Netlify Functions, ou Supabase Edge Functions.</div></div>
-              <div style={{marginTop:12,padding:12,background:"#05966915",borderRadius:8,border:"1px solid #05966930"}}><b style={{color:"#34d399"}}>💡 Proxy Node.js:</b>
-                <pre style={{marginTop:6,padding:10,background:"#08081a",borderRadius:6,fontSize:11,color:"#a5b4fc",overflow:"auto",whiteSpace:"pre-wrap"}}>{`const express = require('express');
-const cors = require('cors');
-const app = express();
-app.use(cors());
-
-app.get('/api/places/search', async (req, res) => {
-  const { query } = req.query;
-  const KEY = process.env.GOOGLE_API_KEY;
-  const url = \`https://maps.googleapis.com/maps/api/place/textsearch/json?query=\${encodeURIComponent(query)}&key=\${KEY}&language=pt-BR\`;
-  const r = await fetch(url);
-  res.json(await r.json());
-});
-
-app.get('/api/places/details', async (req, res) => {
-  const { place_id } = req.query;
-  const KEY = process.env.GOOGLE_API_KEY;
-  const url = \`https://maps.googleapis.com/maps/api/place/details/json?place_id=\${place_id}&fields=name,formatted_address,formatted_phone_number,international_phone_number,website,rating,user_ratings_total,types,opening_hours,business_status,geometry,price_level,plus_code,url,vicinity&key=\${KEY}&language=pt-BR\`;
-  const r = await fetch(url);
-  res.json(await r.json());
-});
-
-app.listen(3001);`}</pre></div>
+              <b style={{color:"#fbbf24"}}>APIs necessárias no Google Cloud Console:</b>
+              <div style={{marginTop:8}}>✦ <b>Maps JavaScript API</b> (obrigatório)<br/>✦ <b>Places API</b> (obrigatório)</div>
+              <div style={{marginTop:12,padding:12,background:"#05966915",borderRadius:8,border:"1px solid #05966930"}}>
+                <b style={{color:"#34d399"}}>✅ Sem proxy!</b>
+                <div style={{marginTop:4,color:"#ccc"}}>Esta versão usa a <b>Maps JavaScript API + Places Library</b> que funciona direto no navegador, sem necessidade de backend proxy.</div>
+              </div>
+              <div style={{marginTop:8,padding:12,background:"#fbbf2410",borderRadius:8,border:"1px solid #fbbf2430"}}>
+                <b style={{color:"#fbbf24"}}>⚠ Restrições recomendadas:</b>
+                <div style={{marginTop:4,color:"#ccc"}}>No Google Cloud Console, restrinja sua API Key por <b>HTTP referrer</b> (domínio do seu site) para evitar uso indevido.</div>
+              </div>
             </div>
             <button onClick={()=>{dp({type:"CFG",p:tmpC});noti("Salvo!")}} style={btnP}>{I.Check(14)} Salvar</button>
           </div>}
@@ -352,8 +451,7 @@ app.listen(3001);`}</pre></div>
               <b style={{color:"#34d399"}}>SQL para criar tabela:</b>
               <pre style={{marginTop:8,padding:12,background:"#08081a",borderRadius:8,fontSize:11,color:"#a5b4fc",overflow:"auto",whiteSpace:"pre-wrap"}}>{`CREATE TABLE leads (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  place_id TEXT UNIQUE,
-  name TEXT NOT NULL,
+  place_id TEXT UNIQUE, name TEXT NOT NULL,
   address TEXT, phone TEXT, international_phone TEXT,
   website TEXT, rating REAL, reviews_count INTEGER,
   types JSONB DEFAULT '[]', status TEXT DEFAULT 'new',
@@ -361,14 +459,12 @@ app.listen(3001);`}</pre></div>
   latitude REAL, longitude REAL,
   business_status TEXT, price_level INTEGER,
   search_state TEXT, search_city TEXT, search_neighborhood TEXT,
-  captured_at TIMESTAMPTZ DEFAULT NOW(),
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  captured_at TIMESTAMPTZ DEFAULT NOW(), created_at TIMESTAMPTZ DEFAULT NOW()
 );
 ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Allow all" ON leads FOR ALL USING (true) WITH CHECK (true);
 CREATE INDEX idx_leads_place_id ON leads(place_id);`}</pre>
             </div>
-            <div style={{padding:12,background:"#fbbf2410",borderRadius:8,marginBottom:16,border:"1px solid #fbbf2430",fontSize:12,color:"#ccc"}}><b style={{color:"#fbbf24"}}>Checklist:</b> 1) Crie a tabela 2) RLS habilitado com policy 3) Use chave anon 4) URL sem barra final</div>
             <button onClick={()=>{dp({type:"CFG",p:tmpC});noti("Supabase salvo!")}} style={btnP}>{I.Check(14)} Salvar</button>
           </div>}
 

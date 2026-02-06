@@ -1,6 +1,6 @@
-# ⚡ PLEADS CRM - Power Lead Capture
+# ⚡ PleadsC - Power Lead Capture CRM
 
-CRM capturador de leads usando a **Google Places API**. Busque empresas por cidade, estado e bairro, gerencie status, adicione comentários e sincronize com o **Supabase**.
+CRM capturador de leads usando a **Google Places API** (via Maps JavaScript API). Busque empresas por cidade, estado e bairro, gerencie status, adicione comentários e sincronize com o **Supabase**.
 
 ![React](https://img.shields.io/badge/React-18-61dafb?logo=react)
 ![Vite](https://img.shields.io/badge/Vite-5-646cff?logo=vite)
@@ -10,7 +10,7 @@ CRM capturador de leads usando a **Google Places API**. Busque empresas por cida
 
 ## 📸 Features
 
-- 🔍 **Busca por Google Places** — Text Search + Place Details
+- 🔍 **Busca por Google Places** — Text Search + Place Details direto no navegador (sem proxy)
 - 📍 **Filtro por Estado, Cidade e Bairro** — bairros multiplicam buscas para superar o limite de 60 resultados
 - 📊 **Pipeline de Status** — Novo, Contatado, Negociando, Convertido, Perdido (customizável)
 - 💬 **Comentários por lead** — adicione anotações em cada lead
@@ -31,37 +31,19 @@ cd PleadsC
 npm install
 ```
 
-### 2. Configure as variáveis de ambiente
+### 2. Rode o app
 
 ```bash
-cp .env.example .env
-```
-
-Edite o `.env` com sua chave da Google Places API:
-
-```
-GOOGLE_API_KEY=AIzaSy...sua_chave_aqui
-```
-
-### 3. Instale dependências do proxy
-
-```bash
-npm install express cors dotenv
-```
-
-### 4. Rode o proxy + app
-
-Em dois terminais:
-
-```bash
-# Terminal 1 - Backend proxy (resolve CORS)
-npm run proxy
-
-# Terminal 2 - Frontend
 npm run dev
 ```
 
 Acesse: **http://localhost:5173**
+
+### 3. Configure no app
+
+1. Vá em **Config → Google Places API**
+2. Cole sua API Key
+3. Pronto! Comece a buscar leads
 
 ---
 
@@ -70,14 +52,16 @@ Acesse: **http://localhost:5173**
 1. Acesse [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
 2. Crie um projeto (ou use um existente)
 3. Habilite as APIs:
-   - **Places API**
-   - **Places API (New)** — recomendado
+   - **Maps JavaScript API** (obrigatório)
+   - **Places API** (obrigatório)
 4. Crie uma credencial (API Key)
-5. Cole no `.env` como `GOOGLE_API_KEY`
+5. Cole na configuração do app
 
-### ⚠️ Sobre CORS
+### 🔒 Segurança
 
-A Google Places API **não permite** chamadas diretas do navegador. O projeto inclui um proxy Express em `server/proxy.js` que faz a intermediação. O Vite está configurado para redirecionar `/api/places/*` para o proxy automaticamente.
+No Google Cloud Console, restrinja sua API Key por **HTTP referrer** (domínio do seu site) para evitar uso indevido.
+
+> ✅ Esta versão usa a **Maps JavaScript API + Places Library** que funciona direto no navegador, sem necessidade de backend proxy.
 
 ---
 
@@ -130,8 +114,6 @@ CREATE INDEX idx_leads_place_id ON leads(place_id);
 PleadsC/
 ├── public/
 │   └── vite.svg
-├── server/
-│   └── proxy.js          # Proxy para Google Places API
 ├── src/
 │   ├── App.jsx            # Aplicação principal
 │   └── main.jsx           # Entry point React
@@ -149,8 +131,7 @@ PleadsC/
 
 - **React 18** — UI
 - **Vite 5** — Build tool
-- **Express** — Proxy backend
-- **Google Places API** — Dados de leads
+- **Google Maps JavaScript API** — Busca de leads (sem proxy)
 - **Supabase** — Banco de dados PostgreSQL
 
 ---
